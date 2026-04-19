@@ -1,0 +1,12 @@
+pydantic>=2.0
+pydantic-settings>=2.0
+python-dotenv
+requests
+langgraph
+langchain
+sentence-transformers
+chromadb
+numpy
+pandas
+pyarrow
+streamlit
