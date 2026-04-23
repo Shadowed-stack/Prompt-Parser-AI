@@ -5,6 +5,6 @@ st.title("PRANAG AI")
 
 prompt = st.text_input("Enter prompt")
 
-if st.button("Run"):
+if st.button("Generate"):
     result = run_pipeline(prompt)
-    st.json(result["spec"])
+    st.json(result)
