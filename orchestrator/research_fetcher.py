@@ -1,5 +1,5 @@
-def fetch_research(query):
+def fetch_research(query: str):
     return [
-        {"title": "Paper 1", "finding": "Heat tolerance improves yield"},
-        {"title": "Paper 2", "finding": "Deep roots improve drought resistance"}
+        {"title": "Heat stress paper", "key_finding": "HSP proteins improve tolerance", "relevance": 0.9},
+        {"title": "Drought study", "key_finding": "Deep roots increase survival", "relevance": 0.85}
     ]
