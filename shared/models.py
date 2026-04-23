@@ -1,20 +1,21 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional
 
 class ParsedPrompt(BaseModel):
     crop: str
     location: str
-    temperature: Optional[float] = None
-    stress: List[str] = []
+    temperature: Optional[float]
+    stress: List[str]
 
 class Trait(BaseModel):
     trait_name: str
     value: float
-    similarity: float
+    similarity_score: float
 
-class Research(BaseModel):
+class ResearchInsight(BaseModel):
     title: str
-    finding: str
+    key_finding: str
+    relevance: float
 
 class Spec(BaseModel):
     crop: str
@@ -23,4 +24,4 @@ class Spec(BaseModel):
     stress: List[str]
     traits: List[str]
     scientific_basis: List[str]
-    confidence: float
+    confidence: float = Field(..., ge=0, le=1)
