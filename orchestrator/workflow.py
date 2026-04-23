@@ -8,21 +8,25 @@ from orchestrator.spec_builder import build_spec
 from orchestrator.output_validator import validate_spec
 
 
-def run_pipeline(prompt):
+def run_pipeline(prompt: str):
     retries = 0
 
     while retries < settings.max_retries:
+
         parsed = parse_prompt(prompt)
+
         traits = search_traits(prompt)
+
         research = fetch_research(prompt)
 
         spec = build_spec(parsed, traits, research)
-        valid = validate_spec(spec)
 
-        if valid:
+        validated = validate_spec(spec)
+
+        if validated:
             return {
                 "pipeline_id": str(uuid.uuid4()),
-                "spec": valid
+                "spec": validated
             }
 
         retries += 1
