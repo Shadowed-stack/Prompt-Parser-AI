@@ -1,19 +1,14 @@
 """
 Prompt Parser  (Harshit's LLM layer)
 
-Converts a free-text user prompt into a structured ParsedPrompt dict by calling
-the local Ollama model.
+Converts a free-text user prompt into a structured ParsedPrompt dict.
 
-BUGS FIXED vs original:
-  1. Missing  "stream": False  → Ollama defaults to streaming; json() on a
-     streaming response raises JSONDecodeError.
-  2. System prompt said only "Return ONLY JSON" — model had no idea what fields
-     to produce.  Now includes explicit schema + example.
-  3. extract_json used match.group() without checking if match is None first.
-  4. Response key was r.json()["message"]["content"] but the Ollama /api/chat
-     endpoint nests inside "message" only when stream=False; guard added.
-  5. Bare `except:` swallowed all errors silently.  Now logs and re-raises so
-     the retry logic in workflow.py can count the failure.
+Key fixes over v1:
+  • Strips DeepSeek-R1 <think>…</think> CoT blocks before JSON extraction
+  • Normalises field aliases ("stress" → "stress_conditions", etc.)
+  • Rule-based regex fallback with an Indian-places lookup so the pipeline
+    NEVER returns crop=unknown / location=unknown when they are in the prompt
+  • LLM + regex results are merged field-by-field (best of both)
 """
 import json
 import re
@@ -24,29 +19,28 @@ from shared.config import settings
 
 logger = logging.getLogger(__name__)
 
-# ── System prompt with explicit JSON schema ───────────────────────────────────
+# ─── System prompt ────────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = """You are PRANAG-AI's scientific prompt parser.
 
-Your ONLY job is to convert the user's natural language prompt into a single
-JSON object.  Output NOTHING except the JSON — no explanation, no markdown
-fences, no extra text.
+Your ONLY job: convert the user prompt into ONE JSON object.
+Output NOTHING except the JSON — no markdown fences, no explanation, no <think> tags.
 
-The JSON must follow this exact schema:
+EXACT schema (use these exact key names):
 {
-  "crop":              string,               // crop name, e.g. "wheat"
-  "location":          string,               // place name, e.g. "Jodhpur, Rajasthan"
-  "temperature":       number | null,        // target temperature in °C
-  "humidity":          number | null,        // relative humidity in %
-  "rainfall":          number | null,        // annual rainfall in mm
-  "soil_type":         string | null,        // e.g. "sandy loam"
-  "stress_conditions": [string],             // e.g. ["heat stress", "drought"]
-  "target_traits":     [string],             // desired traits, e.g. ["heat tolerance"]
-  "constraints":       { string: any }       // any other key-value constraints
+  "crop":              string,
+  "location":          string,
+  "temperature":       number | null,
+  "humidity":          number | null,
+  "rainfall":          number | null,
+  "soil_type":         string | null,
+  "stress_conditions": [string],
+  "target_traits":     [string],
+  "constraints":       {}
 }
 
 EXAMPLE
-Input:  "I want wheat that can grow in Jodhpur at 48°C with low rainfall"
+Input:  "wheat for Jodhpur at 48°C with low rainfall"
 Output:
 {
   "crop": "wheat",
@@ -55,34 +49,31 @@ Output:
   "humidity": null,
   "rainfall": 300,
   "soil_type": "sandy loam",
-  "stress_conditions": ["extreme heat stress", "drought stress", "low rainfall"],
+  "stress_conditions": ["extreme heat stress", "low rainfall", "drought"],
   "target_traits": ["heat tolerance", "drought resistance", "deep root system"],
   "constraints": {}
 }
 """
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ─── Field-name aliases ───────────────────────────────────────────────────────
 
-def _extract_json(text: str) -> dict:
-    """
-    Robustly extract the first JSON object from *text*.
-    Handles models that wrap output in markdown code fences.
-    """
-    # Strip markdown fences if present
-    text = re.sub(r"```(?:json)?", "", text).strip()
-
-    # Try direct parse first
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    # Fall back to regex extraction
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
-        raise ValueError(f"No JSON object found in LLM response:\n{text[:300]}")
-    return json.loads(match.group(0))
-
+_ALIASES: dict = {
+    "stress":             "stress_conditions",
+    "stresses":           "stress_conditions",
+    "stress_factors":     "stress_conditions",
+    "traits":             "target_traits",
+    "desired_traits":     "target_traits",
+    "target_trait":       "target_traits",
+    "temp":               "temperature",
+    "temperature_c":      "temperature",
+    "temp_celsius":       "temperature",
+    "rain":               "rainfall",
+    "rainfall_mm":        "rainfall",
+    "soil":               "soil_type",
+    "place":              "location",
+    "region":             "location",
+    "city":               "location",
+}
 
 _FALLBACK: dict = {
     "crop": "unknown",
@@ -96,55 +87,183 @@ _FALLBACK: dict = {
     "constraints": {},
 }
 
-# ── Main function ─────────────────────────────────────────────────────────────
+# ─── Indian places lookup ─────────────────────────────────────────────────────
+
+_INDIAN_PLACES: list[str] = [
+    "punjab", "haryana", "rajasthan", "gujarat", "maharashtra", "karnataka",
+    "tamil nadu", "andhra pradesh", "telangana", "madhya pradesh", "uttar pradesh",
+    "bihar", "jharkhand", "odisha", "west bengal", "assam", "kerala",
+    "himachal pradesh", "uttarakhand", "goa", "delhi", "mumbai", "chennai",
+    "kolkata", "bangalore", "bengaluru", "hyderabad", "jodhpur", "jaipur",
+    "lucknow", "kanpur", "nagpur", "surat", "ahmedabad", "amritsar", "ludhiana",
+    "chandigarh", "patna", "bhopal", "indore", "vadodara", "agra", "varanasi",
+    "meerut", "nashik", "coimbatore", "madurai", "vijayawada", "barmer",
+    "bikaner", "sikar", "kota", "ajmer", "udaipur", "dehradun", "shimla",
+]
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def _strip_think_tags(text: str) -> str:
+    """Remove DeepSeek-R1 <think>…</think> chain-of-thought blocks."""
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+
+def _normalise_keys(raw: dict) -> dict:
+    """Map aliased field names to canonical names."""
+    return {_ALIASES.get(k.lower(), k.lower()): v for k, v in raw.items()}
+
+
+def _extract_json(text: str) -> dict:
+    text = _strip_think_tags(text)
+    text = re.sub(r"```(?:json)?", "", text).strip().rstrip("`").strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        raise ValueError(f"No JSON object in LLM output:\n{text[:400]}")
+    return json.loads(match.group(0))
+
+
+# ─── Rule-based fallback ──────────────────────────────────────────────────────
+
+_STRESS_KEYWORDS: dict = {
+    "heat stress":     ["heat", "hot", "temperature", "degree", "celsius", "thermal"],
+    "drought stress":  ["drought", "dry", "low rainfall", "arid", "water stress"],
+    "salinity stress": ["saline", "salinity", "salt", "alkaline"],
+    "cold stress":     ["cold", "frost", "freeze", "winter"],
+    "flood stress":    ["flood", "waterlog", "submerge"],
+}
+
+_TRAIT_MAP: dict = {
+    "heat tolerance":      ["heat", "hot", "high temperature", "degree", "celsius"],
+    "drought resistance":  ["drought", "dry", "low rainfall", "water"],
+    "salinity tolerance":  ["saline", "salt", "alkaline"],
+    "high yield":          ["yield", "productive", "output"],
+    "disease resistance":  ["disease", "fungal", "rust", "blight"],
+}
+
+_TEMP_RE = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*(?:degree[s]?\s*)?°?\s*[cC](?:elsius)?")
+_DEG_RE  = re.compile(r"(\d{2,3})\s*degree")
+_HUM_RE  = re.compile(r"(\d{1,3})\s*%\s*humidity")
+_RAIN_RE = re.compile(r"(\d{2,4})\s*mm")
+
+_CROPS: list[str] = [
+    "wheat", "rice", "maize", "corn", "barley", "sorghum", "millet",
+    "soybean", "cotton", "mustard", "chickpea", "lentil", "bajra",
+    "jowar", "groundnut", "sugarcane", "potato", "tomato", "oat",
+]
+
+
+def _extract_location(prompt: str) -> str:
+    """Extract location with Indian-places lookup, then capitalised-word fallback."""
+    p = prompt.lower()
+    # 1. Known Indian place (longest match wins)
+    matched = [place for place in _INDIAN_PLACES if place in p]
+    if matched:
+        return max(matched, key=len).title()
+    # 2. Capitalised word(s) after a preposition
+    m = re.search(
+        r"(?:in|for|at|from|near)\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)", prompt
+    )
+    return m.group(1).strip() if m else "unknown"
+
+
+def _regex_fallback(prompt: str) -> dict:
+    """
+    Extract structured fields from the prompt using simple rules.
+    Guarantees non-unknown values when crop/location/temperature are clearly present.
+    """
+    p = prompt.lower()
+
+    # Temperature
+    temp_match = _TEMP_RE.search(prompt) or _DEG_RE.search(p)
+    temperature = float(temp_match.group(1)) if temp_match else None
+
+    # Humidity / Rainfall
+    hum_match  = _HUM_RE.search(p)
+    rain_match = _RAIN_RE.search(p)
+    humidity   = float(hum_match.group(1))  if hum_match  else None
+    rainfall   = float(rain_match.group(1)) if rain_match else None
+
+    # Stress conditions
+    stresses = [s for s, kws in _STRESS_KEYWORDS.items() if any(kw in p for kw in kws)]
+    if not stresses and temperature and temperature >= 38:
+        stresses = ["heat stress"]
+
+    # Target traits
+    traits = [t for t, kws in _TRAIT_MAP.items() if any(kw in p for kw in kws)]
+    if not traits and stresses:
+        traits = [
+            s.replace(" stress", " tolerance").replace(" stress", " resistance")
+            for s in stresses
+        ]
+
+    return {
+        "crop":              next((c for c in _CROPS if c in p), "unknown"),
+        "location":          _extract_location(prompt),
+        "temperature":       temperature,
+        "humidity":          humidity,
+        "rainfall":          rainfall,
+        "soil_type":         None,
+        "stress_conditions": stresses,
+        "target_traits":     traits,
+        "constraints":       {},
+        "_source":           "regex_fallback",
+    }
+
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
 
 def parse_prompt(user_prompt: str) -> dict:
     """
-    Call the Ollama model and return a validated ParsedPrompt dict.
-    Raises RuntimeError if the model is unreachable or returns unparseable output.
+    Strategy:
+    1. Regex fallback runs immediately (fast, no network, always works).
+    2. LLM called via Ollama; on success its non-empty fields override regex.
+    3. Merged result: every field is the best available value.
     """
-    payload = {
-        "model": settings.ollama_model,
-        "stream": False,                       # ← BUG FIX: must be False
-        "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    f"Parse this prompt into the JSON schema above:\n\n{user_prompt}"
-                ),
-            },
-        ],
-    }
+    # Step 1 — regex baseline
+    regex_result = _regex_fallback(user_prompt)
+    base = {**_FALLBACK, **regex_result}
 
+    # Step 2 — LLM attempt
     try:
+        payload = {
+            "model":  settings.ollama_model,
+            "stream": False,
+            "messages": [
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user",   "content": f"Parse this prompt:\n\n{user_prompt}"},
+            ],
+        }
         resp = requests.post(
             f"{settings.ollama_base_url}/api/chat",
             json=payload,
             timeout=settings.ollama_timeout,
         )
         resp.raise_for_status()
-    except requests.exceptions.ConnectionError as exc:
-        raise RuntimeError(
-            f"Cannot reach Ollama at {settings.ollama_base_url}. "
-            "Is the server running?  `ollama serve`"
-        ) from exc
-    except requests.exceptions.HTTPError as exc:
-        raise RuntimeError(f"Ollama HTTP error: {exc}") from exc
+        raw_text = resp.json().get("message", {}).get("content", "")
 
-    body = resp.json()
+        if raw_text:
+            llm_result = _normalise_keys(_extract_json(raw_text))
+            # Step 3 — merge: LLM wins only on non-empty, non-unknown values
+            for key in _FALLBACK:
+                val = llm_result.get(key)
+                if val not in (None, "", "unknown", [], {}):
+                    base[key] = val
+            logger.info("[prompt_parser] LLM merge applied.")
+        else:
+            logger.warning("[prompt_parser] Empty LLM response — regex only.")
 
-    # /api/chat wraps the reply in body["message"]["content"] when stream=False
-    raw_text: str = body.get("message", {}).get("content", "")
-    if not raw_text:
-        raise RuntimeError(f"Empty content from Ollama.  Full response: {body}")
+    except requests.exceptions.ConnectionError:
+        logger.warning("[prompt_parser] Ollama not reachable — regex fallback only.")
+    except requests.exceptions.Timeout:
+        logger.warning("[prompt_parser] Ollama timed out — regex fallback only.")
+    except (ValueError, json.JSONDecodeError, KeyError) as exc:
+        logger.warning("[prompt_parser] LLM output unparseable (%s) — regex used.", exc)
 
-    try:
-        parsed = _extract_json(raw_text)
-    except (ValueError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"LLM output could not be parsed as JSON: {exc}") from exc
-
-    # Merge with fallback to ensure all keys exist
-    result = {**_FALLBACK, **parsed}
-    logger.info("[prompt_parser] Parsed: %s", result)
-    return result
+    # Remove internal _source key before returning
+    base.pop("_source", None)
+    logger.info("[prompt_parser] Final: %s", base)
+    return base
