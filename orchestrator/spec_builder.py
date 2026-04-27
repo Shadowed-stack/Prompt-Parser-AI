@@ -1,47 +1,51 @@
 """
 Spec Builder
 
-Combines:
-  • parsed prompt  (from LLM)
-  • retrieved traits  (from ChromaDB)
-  • research insights  (from Semantic Scholar)
+Combines parsed prompt + retrieved traits + research insights
+→ raw dict for output_validator.py
 
-→ produces the raw dict that output_validator.py turns into a typed Spec.
+Improvement over v1:
+  • Confidence score rewards crop-specific trait matches
+  • Warns when retrieved traits are mostly off-crop
 """
+import logging
 from shared.config import settings
 
+logger = logging.getLogger(__name__)
 
-def build_spec(
-    parsed: dict,
-    traits: list[str],
-    research: list[dict],
-) -> dict:
-    """
-    Merge all pipeline artefacts into a single spec dict.
 
-    Args:
-        parsed:    Output of prompt_parser.parse_prompt()
-        traits:    List of trait description strings from similarity_search
-        research:  List of ResearchInsight dicts from research_fetcher
+def build_spec(parsed: dict, traits: list[str], research: list[dict]) -> dict:
+    crop = parsed.get("crop", "unknown")
 
-    Returns:
-        Raw dict matching the Spec schema in shared/models.py
-    """
-    # Confidence heuristic: penalise missing fields, reward more traits/research
+    # ── Confidence heuristic ─────────────────────────────────────────────────
     missing_penalty = sum([
-        0.1 if not parsed.get("temperature") else 0,
-        0.1 if not parsed.get("location") or parsed["location"] == "unknown" else 0,
-        0.05 if not parsed.get("stress_conditions") else 0,
+        0.10 if not parsed.get("temperature")                       else 0,
+        0.10 if not parsed.get("location") or
+                parsed["location"] == "unknown"                     else 0,
+        0.05 if not parsed.get("stress_conditions")                 else 0,
+        0.05 if crop == "unknown"                                   else 0,
     ])
-    trait_bonus    = min(len(traits) * 0.02, 0.1)
-    research_bonus = min(len(research) * 0.02, 0.1)
-    confidence     = round(
+
+    # Reward traits that mention the crop by name
+    crop_trait_hits = sum(
+        1 for t in traits if crop.lower() in t.lower()
+    ) if crop != "unknown" else 0
+    trait_bonus    = min(len(traits) * 0.02 + crop_trait_hits * 0.03, 0.15)
+    research_bonus = min(len(research) * 0.02, 0.10)
+
+    confidence = round(
         max(0.0, min(1.0, 0.80 - missing_penalty + trait_bonus + research_bonus)),
         2,
     )
 
+    if crop != "unknown" and crop_trait_hits == 0 and len(traits) > 0:
+        logger.warning(
+            "[spec_builder] No crop-specific traits found for '%s'. "
+            "Consider adding %s entries to vector_store.SEED_TRAITS.", crop, crop
+        )
+
     return {
-        "crop":              parsed.get("crop", "unknown"),
+        "crop":              crop,
         "location":          parsed.get("location", "unknown"),
         "temperature":       parsed.get("temperature") or 25.0,
         "humidity":          parsed.get("humidity"),
