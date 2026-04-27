@@ -1,27 +1,58 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
+
+
+# ── Intermediate pipeline models ──────────────────────────────────────────────
 
 class ParsedPrompt(BaseModel):
+    """Structured output produced by the LLM from a free-text user prompt."""
     crop: str
     location: str
-    temperature: Optional[float]
-    stress: List[str]
+    temperature: Optional[float] = None          # °C
+    humidity: Optional[float] = None             # %
+    rainfall: Optional[float] = None             # mm/year
+    soil_type: Optional[str] = None
+    stress_conditions: List[str] = Field(default_factory=list)
+    target_traits: List[str] = Field(default_factory=list)
+    constraints: Dict[str, Any] = Field(default_factory=dict)
+
 
 class Trait(BaseModel):
     trait_name: str
-    value: float
-    similarity_score: float
+    similarity_score: float = Field(..., ge=0.0, le=1.0)
+    domain: str = "biology"
+
 
 class ResearchInsight(BaseModel):
     title: str
     key_finding: str
-    relevance: float
+    relevance: float = Field(..., ge=0.0, le=1.0)
+    source: str = "semantic_scholar"
+    url: Optional[str] = None
+
+
+# ── Final validated output ────────────────────────────────────────────────────
 
 class Spec(BaseModel):
+    """
+    The canonical spec.json that is handed off to the simulation team (Srikar/Aryan).
+    All fields are validated by Pydantic before the pipeline returns.
+    """
     crop: str
     location: str
-    temperature: float
-    stress: List[str]
-    traits: List[str]
-    scientific_basis: List[str]
-    confidence: float = Field(..., ge=0, le=1)
+    temperature: float = 25.0
+    humidity: Optional[float] = None
+    rainfall: Optional[float] = None
+    soil_type: Optional[str] = None
+    stress_conditions: List[str] = Field(default_factory=list)
+    target_traits: List[str] = Field(default_factory=list)
+    retrieved_traits: List[str] = Field(default_factory=list)
+    scientific_basis: List[str] = Field(default_factory=list)
+    research_sources: List[str] = Field(default_factory=list)
+    constraints: Dict[str, Any] = Field(default_factory=dict)
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    pipeline_version: str = "1.0.0"
+
+
+# ── LangGraph state (must be a plain TypedDict for LangGraph) ─────────────────
+# Defined in workflow.py to keep the graph self-contained.
