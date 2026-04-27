@@ -1,13 +1,11 @@
 """
-PRANAG-AI Prompt-Parser Workflow  (Harshit's LangGraph layer)
+PRANAG-AI Prompt-Parser Workflow  (LangGraph StateGraph)
 
-State machine:
-  parse_node → search_node → research_node → build_node → validate_node
-                 ↑                                               |
-                 └──────── retry (if validate fails) ───────────┘
-
-Uses LangGraph's StateGraph with a TypedDict state so every node is a pure
-function — easy to test, easy to extend.
+Fix over v1:
+  • search_node no longer bails on parse error — uses original prompt as query
+    so retrieved_traits are always populated even when LLM fails.
+  • research_node always runs (non-fatal).
+  • Better logging per node.
 """
 import uuid
 import logging
@@ -25,7 +23,7 @@ from search_engine.similarity_search import search_traits
 logger = logging.getLogger(__name__)
 
 
-# ── State definition ──────────────────────────────────────────────────────────
+# ── State ─────────────────────────────────────────────────────────────────────
 
 class PipelineState(TypedDict):
     prompt:    str
@@ -38,57 +36,66 @@ class PipelineState(TypedDict):
     retries:   int
 
 
-# ── Node functions ────────────────────────────────────────────────────────────
+# ── Nodes ─────────────────────────────────────────────────────────────────────
 
 def parse_node(state: PipelineState) -> PipelineState:
-    """LLM: free text → structured ParsedPrompt dict."""
+    """LLM + regex: free text → ParsedPrompt dict.
+    parse_prompt() now never fully fails — regex fallback guarantees a result."""
     try:
         parsed = parse_prompt(state["prompt"])
         return {**state, "parsed": parsed, "error": None}
     except Exception as exc:
-        logger.error("[parse_node] %s", exc)
-        return {**state, "error": str(exc), "retries": state["retries"] + 1}
+        logger.error("[parse_node] Unexpected error: %s", exc)
+        return {**state, "parsed": None, "error": str(exc), "retries": state["retries"] + 1}
 
 
 def search_node(state: PipelineState) -> PipelineState:
-    """ChromaDB: retrieve relevant traits for the parsed query."""
-    if state.get("error"):
-        return state   # skip if upstream already failed
+    """ChromaDB: retrieve relevant traits.
 
-    parsed = state["parsed"] or {}
+    KEY FIX: we no longer skip when there's a parse error.
+    Even if parsed is None, we fall back to searching with the raw prompt.
+    """
+    parsed = state.get("parsed") or {}
+
+    # Build a rich query from whatever we know
     query_parts = [
         parsed.get("crop", ""),
         parsed.get("location", ""),
         " ".join(parsed.get("stress_conditions", [])),
         " ".join(parsed.get("target_traits", [])),
     ]
-    query = " ".join(p for p in query_parts if p).strip() or state["prompt"]
+    query = " ".join(p for p in query_parts if p).strip()
+
+    # Last resort: use the original prompt directly
+    if not query or query.strip() == "":
+        query = state["prompt"]
 
     try:
         traits = search_traits(query)
+        logger.info("[search_node] Retrieved %d traits for query: '%s'", len(traits), query[:60])
         return {**state, "traits": traits}
     except Exception as exc:
-        logger.warning("[search_node] %s — continuing with empty traits", exc)
-        return {**state, "traits": [], "error": str(exc)}
+        logger.warning("[search_node] Search failed: %s", exc)
+        return {**state, "traits": []}
 
 
 def research_node(state: PipelineState) -> PipelineState:
-    """Semantic Scholar: fetch recent papers matching the query."""
+    """Semantic Scholar: fetch relevant papers."""
     parsed = state.get("parsed") or {}
-    crop   = parsed.get("crop", "crop")
-    stress = " ".join(parsed.get("stress_conditions", ["stress"]))
-    query  = f"{crop} {stress} tolerance"
+    crop   = parsed.get("crop") or "crop"
+    stress = " ".join(parsed.get("stress_conditions", [])) or "stress tolerance"
+    query  = f"{crop} {stress}"
 
     try:
         research = fetch_research(query)
-        return {**state, "research": research, "error": None}
+        logger.info("[research_node] Fetched %d insights.", len(research))
+        return {**state, "research": research}
     except Exception as exc:
-        logger.warning("[research_node] %s — continuing with fallback research", exc)
-        return {**state, "research": [], "error": None}   # non-fatal
+        logger.warning("[research_node] %s — using empty research.", exc)
+        return {**state, "research": []}
 
 
 def build_node(state: PipelineState) -> PipelineState:
-    """Assemble all artefacts into a raw spec dict."""
     spec = build_spec(
         state.get("parsed") or {},
         state.get("traits") or [],
@@ -98,7 +105,6 @@ def build_node(state: PipelineState) -> PipelineState:
 
 
 def validate_node(state: PipelineState) -> PipelineState:
-    """Pydantic: validate spec dict → serialised Spec or flag retry."""
     validated = validate_spec(state.get("spec") or {})
     if validated:
         return {**state, "validated": validated, "error": None}
@@ -109,67 +115,46 @@ def validate_node(state: PipelineState) -> PipelineState:
     }
 
 
-# ── Routing logic ─────────────────────────────────────────────────────────────
+# ── Routing ───────────────────────────────────────────────────────────────────
 
-def _route_after_validate(state: PipelineState) -> str:
-    """Decide whether to retry or finish."""
+def _route(state: PipelineState) -> str:
     if state.get("validated"):
         return "done"
     if state["retries"] < settings.max_retries:
-        logger.info(
-            "[workflow] Retry %d/%d …", state["retries"], settings.max_retries
-        )
+        logger.info("[workflow] Retry %d/%d", state["retries"], settings.max_retries)
         return "retry"
-    logger.error("[workflow] Max retries reached.  Returning partial result.")
+    logger.error("[workflow] Max retries reached.")
     return "done"
 
 
-# ── Graph assembly ─────────────────────────────────────────────────────────────
+# ── Graph ─────────────────────────────────────────────────────────────────────
 
 def _build_graph():
-    graph = StateGraph(PipelineState)
+    g = StateGraph(PipelineState)
+    g.add_node("parse",    parse_node)
+    g.add_node("search",   search_node)
+    g.add_node("research", research_node)
+    g.add_node("build",    build_node)
+    g.add_node("validate", validate_node)
 
-    graph.add_node("parse",    parse_node)
-    graph.add_node("search",   search_node)
-    graph.add_node("research", research_node)
-    graph.add_node("build",    build_node)
-    graph.add_node("validate", validate_node)
-
-    graph.set_entry_point("parse")
-
-    graph.add_edge("parse",    "search")
-    graph.add_edge("search",   "research")
-    graph.add_edge("research", "build")
-    graph.add_edge("build",    "validate")
-
-    graph.add_conditional_edges(
-        "validate",
-        _route_after_validate,
-        {"retry": "parse", "done": END},
-    )
-
-    return graph.compile()
+    g.set_entry_point("parse")
+    g.add_edge("parse",    "search")
+    g.add_edge("search",   "research")
+    g.add_edge("research", "build")
+    g.add_edge("build",    "validate")
+    g.add_conditional_edges("validate", _route, {"retry": "parse", "done": END})
+    return g.compile()
 
 
-_graph = None   # lazy singleton
+_graph = None
 
 
 def run_pipeline(prompt: str) -> dict:
-    """
-    Entry point for both main.py and app.py.
-
-    Returns:
-        {
-          "pipeline_id": str,
-          "spec":        dict | None,
-          "error":       str | None,
-        }
-    """
     global _graph
     if _graph is None:
         _graph = _build_graph()
 
-    initial_state: PipelineState = {
+    result = _graph.invoke({
         "prompt":    prompt,
         "parsed":    None,
         "traits":    [],
@@ -178,12 +163,10 @@ def run_pipeline(prompt: str) -> dict:
         "validated": None,
         "error":     None,
         "retries":   0,
-    }
-
-    final_state = _graph.invoke(initial_state)
+    })
 
     return {
         "pipeline_id": str(uuid.uuid4()),
-        "spec":        final_state.get("validated"),
-        "error":       final_state.get("error") if not final_state.get("validated") else None,
+        "spec":        result.get("validated"),
+        "error":       result.get("error") if not result.get("validated") else None,
     }
