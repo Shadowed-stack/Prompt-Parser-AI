@@ -258,9 +258,4 @@ The orchestrator's `search_node` picks up new entries automatically on the next 
 ---
 
 ## Team
-
-| Module | Owner |
-|---|---|
-| `orchestrator/` | Harshit |
-| `search_engine/` | Search engine team |
-| Simulation endpoint | Srikar / Aryan |
+Ashirwad, Om and Shambhavi
