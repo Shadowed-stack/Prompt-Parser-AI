@@ -10,8 +10,10 @@ langgraph>=0.1.0
 sentence-transformers>=2.7
 chromadb>=0.5
 
+# Data loading — required for load_from_parquet() and clean_parquet()
+# Needed to load universal_index_final.parquet (254k rows, 25MB)
+pandas>=2.0
+pyarrow>=14.0
+
 # UI
 streamlit>=1.35
-
-# Optional: faster numerical ops used by sentence-transformers
-# numpy>=1.26  # usually installed as a transitive dependency
