@@ -94,6 +94,7 @@ def fetch_research(query: str, limit: int | None = None) -> list[dict]:
             "relevance":   _relevance(abstract, query),
             "source":      "semantic_scholar",
             "url":         url,
+            "year":        p.get("year"),
         })
 
     if not insights:
