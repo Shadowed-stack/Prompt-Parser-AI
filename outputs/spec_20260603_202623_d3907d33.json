@@ -1,0 +1,52 @@
+{
+  "crop": "wheat",
+  "location": "Jodhpur",
+  "temperature": 48.0,
+  "humidity": null,
+  "rainfall": null,
+  "soil_type": null,
+  "stress_conditions": [
+    "heat stress",
+    "drought stress"
+  ],
+  "target_traits": [
+    "heat tolerance",
+    "drought resistance"
+  ],
+  "retrieved_traits": [
+    "high canopy temperature tolerance in wheat cultivar HD3086",
+    "drought resistance in wheat via stomata closure and reduced transpiration",
+    "arid zone adaptation Jodhpur Barmer Bikaner Rajasthan low rainfall desert crops",
+    "heat shock protein HSP70 expression increases wheat survival above 45°C",
+    "tiller production in wheat maintained under moderate heat stress conditions",
+    "phytohormone ABA abscisic acid signalling pathway regulates drought response",
+    "grain filling rate in wheat stable between 35°C and 42°C ambient temperature",
+    "osmotic adjustment in wheat through proline accumulation under water deficit",
+    "photosynthetic efficiency under high solar radiation and heat stress tropical crops",
+    "rust resistance genes Lr34 Yr36 for wheat leaf and yellow rust"
+  ],
+  "scientific_basis": [
+    "HSP70 and HSP90 expression is strongly correlated with survival rates above 42°C in cereal crops.",
+    "Deep root architecture combined with osmotic adjustment via proline accumulation increases drought survival by 35%.",
+    "Cultivars with Na⁺/K⁺ ratio regulation maintain yield stability in sandy loam soils with ECe > 6 dS/m."
+  ],
+  "research_sources": [
+    "",
+    "",
+    ""
+  ],
+  "constraints": {},
+  "confidence": 1.0,
+  "pipeline_version": "1.0.0",
+  "generated_at": "2026-06-03T20:26:23.147431+00:00",
+  "research_titles": [
+    "Heat Shock Proteins and Crop Thermotolerance",
+    "Drought Tolerance Mechanisms in Wheat",
+    "Salinity Adaptation in Arid Indian Soils"
+  ],
+  "research_years": [
+    null,
+    null,
+    null
+  ]
+}

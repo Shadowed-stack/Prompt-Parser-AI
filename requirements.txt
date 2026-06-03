@@ -1,0 +1,17 @@
+# Core
+pydantic>=2.6,<3
+pydantic-settings>=2.2,<3
+
+# LLM / Workflow
+requests>=2.31
+langgraph>=0.1.0
+
+# Embeddings + Vector DB
+sentence-transformers>=2.7
+chromadb>=0.5
+
+# UI
+streamlit>=1.35
+
+# Optional: faster numerical ops used by sentence-transformers
+# numpy>=1.26  # usually installed as a transitive dependency

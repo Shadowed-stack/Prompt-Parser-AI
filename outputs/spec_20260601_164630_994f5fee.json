@@ -1,0 +1,51 @@
+{
+  "crop": "wheat",
+  "location": "Jodhpur, Rajasthan",
+  "temperature": 48.0,
+  "humidity": null,
+  "rainfall": null,
+  "soil_type": null,
+  "stress_conditions": [
+    "drought stress"
+  ],
+  "target_traits": [
+    "drought resistance",
+    "heat tolerance"
+  ],
+  "retrieved_traits": [
+    "bajra sandy soil low fertility drought adaptation Rajasthan desert conditions",
+    "arid zone adaptation Jodhpur Barmer Bikaner Rajasthan low rainfall desert crops",
+    "bajra pearl millet extreme heat tolerance above 42°C arid Rajasthan Gujarat",
+    "high canopy temperature tolerance in wheat cultivar HD3086",
+    "cotton heat tolerance boll development above 40°C Maharashtra Gujarat Telangana",
+    "drought resistance in wheat via stomata closure and reduced transpiration",
+    "mustard heat tolerance during pod filling Rajasthan Haryana rabi season",
+    "heat shock protein HSP70 expression increases wheat survival above 45°C",
+    "tiller production in wheat maintained under moderate heat stress conditions",
+    "maize drought tolerance stay-green trait delayed senescence under water stress"
+  ],
+  "scientific_basis": [
+    "HSP70 and HSP90 expression is strongly correlated with survival rates above 42°C in cereal crops.",
+    "Deep root architecture combined with osmotic adjustment via proline accumulation increases drought survival by 35%.",
+    "Cultivars with Na⁺/K⁺ ratio regulation maintain yield stability in sandy loam soils with ECe > 6 dS/m."
+  ],
+  "research_sources": [
+    "",
+    "",
+    ""
+  ],
+  "constraints": {},
+  "confidence": 1.0,
+  "pipeline_version": "1.0.0",
+  "generated_at": "2026-06-01T16:46:30.187309+00:00",
+  "research_titles": [
+    "Heat Shock Proteins and Crop Thermotolerance",
+    "Drought Tolerance Mechanisms in Wheat",
+    "Salinity Adaptation in Arid Indian Soils"
+  ],
+  "research_years": [
+    null,
+    null,
+    null
+  ]
+}
