@@ -32,9 +32,8 @@ def export_spec(spec: dict, pipeline_id: str) -> str | None:
     # ── 1. Save to disk ───────────────────────────────────────────────────────
     if settings.export_to_file:
         os.makedirs(settings.output_dir, exist_ok=True)
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        filename  = f"spec_{timestamp}_{pipeline_id[:8]}.json"
-        filepath  = os.path.join(settings.output_dir, filename)
+        filename = "spec.json"
+        filepath = os.path.join(settings.output_dir, filename)
 
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(spec, f, indent=2, ensure_ascii=False)
