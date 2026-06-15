@@ -46,21 +46,27 @@ _client = None
 _collection = None
 
 
-def _make_client() -> chromadb.ClientAPI:
-    if settings.chroma_persist_dir:
-        return chromadb.PersistentClient(path=settings.chroma_persist_dir)
-    return chromadb.EphemeralClient()
+def _make_client():
+    return chromadb.PersistentClient(
+        path="./chroma_db"
+    )
 
+
+_client = None
+_collection = None
 
 def get_collection():
-    """Return (and lazily create) the ChromaDB collection."""
     global _client, _collection
+
     if _collection is None:
-        _client = _make_client()
-        _collection = _client.get_or_create_collection(
-            name=settings.chroma_collection,
-            metadata={"hnsw:space": "cosine"},
+        _client = chromadb.PersistentClient(
+            path="./chroma_db"
         )
+
+        _collection = _client.get_collection(
+            name="entities"
+        )
+
     return _collection
 
 
