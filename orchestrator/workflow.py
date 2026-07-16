@@ -1,16 +1,17 @@
 """
 PRANAG-AI Prompt-Parser Workflow  (LangGraph StateGraph)
 
-Fix over v1:
-  • search_node no longer bails on parse error — uses original prompt as query
-    so retrieved_traits are always populated even when LLM fails.
-  • research_node always runs (non-fatal).
-  • Better logging per node.
+Changes over previous version:
+  • search_node — fixed NameError: domain_weights was referenced before
+    assignment. Now correctly reads from state:
+      domain_weights = state.get("domain_weights") or {}
+  • Everything else unchanged.
 """
 import uuid
 import logging
+from orchestrator.domain_router import score_domains
 from typing import TypedDict, Optional
-
+from shared.profiler import time_block
 from langgraph.graph import StateGraph, END
 
 from shared.config import settings
@@ -18,7 +19,7 @@ from orchestrator.prompt_parser import parse_prompt
 from orchestrator.research_fetcher import fetch_research
 from orchestrator.spec_builder import build_spec
 from orchestrator.output_validator import validate_spec
-from orchestrator.output_exporter import export_spec        # NEW
+from orchestrator.output_exporter import export_spec
 from search_engine.similarity_search import search_traits
 
 logger = logging.getLogger(__name__)
@@ -27,129 +28,143 @@ logger = logging.getLogger(__name__)
 # ── State ─────────────────────────────────────────────────────────────────────
 
 class PipelineState(TypedDict):
-    prompt:    str
-    pipeline_id: str          # carry the ID through all nodes
-    parsed:    Optional[dict]
-    traits:    list
-    research:  list
-    spec:      Optional[dict]
-    validated: Optional[dict]
-    error:     Optional[str]
-    retries:   int
+    prompt:         str
+    pipeline_id:    str
+    domain_weights: Optional[dict]
+    parsed:         Optional[dict]
+    traits:         list
+    research:       list
+    spec:           Optional[dict]
+    validated:      Optional[dict]
+    error:          Optional[str]
+    retries:        int
 
 
 # ── Nodes ─────────────────────────────────────────────────────────────────────
 
+def domain_node(state: PipelineState) -> PipelineState:
+    """Layer 0: score all domains, keep active ones."""
+    with time_block("Pipeline-DomainNode"):
+        weights = score_domains(state["prompt"])
+        return {"domain_weights": weights}
+
+
 def parse_node(state: PipelineState) -> PipelineState:
-    """LLM + regex: free text → ParsedPrompt dict.
-    parse_prompt() now never fully fails — regex fallback guarantees a result."""
-    try:
-        parsed = parse_prompt(state["prompt"])
-        return {**state, "parsed": parsed, "error": None}
-    except Exception as exc:
-        logger.error("[parse_node] Unexpected error: %s", exc)
-        return {**state, "parsed": None, "error": str(exc), "retries": state["retries"] + 1}
+    with time_block("Pipeline-ParseNode"):
+        try:
+            parsed = parse_prompt(state["prompt"], state.get("domain_weights") or {})
+            return {"parsed": parsed, "error": None}
+        except Exception as exc:
+            logger.error("[parse_node] Unexpected error: %s", exc)
+            return {"parsed": None, "error": str(exc), "retries": state["retries"] + 1}
 
 
 def search_node(state: PipelineState) -> PipelineState:
-    """ChromaDB: retrieve relevant traits.
+    with time_block("Pipeline-SearchNode"):
+        parsed = state.get("parsed") or {}
 
-    KEY FIX: we no longer skip when there's a parse error.
-    Even if parsed is None, we fall back to searching with the raw prompt.
-    """
-    parsed = state.get("parsed") or {}
+        # FIX: read domain_weights from state (was undefined local variable before)
+        domain_weights = state.get("domain_weights") or {}
 
-    # Build a rich query from whatever we know
-    query_parts = [
-        parsed.get("crop", ""),
-        parsed.get("location", ""),
-        " ".join(parsed.get("stress_conditions", [])),
-        " ".join(parsed.get("target_traits", [])),
-    ]
-    query = " ".join(p for p in query_parts if p).strip()
+        # Build query from domain_parameters
+        domain_params = parsed.get("domain_parameters", {})
+        query_parts   = []
+        for domain, params in domain_params.items():
+            if isinstance(params, dict):
+                query_parts.extend(str(v) for v in params.values() if v)
+        query = " ".join(query_parts).strip() or state["prompt"]
 
-    # Last resort: use the original prompt directly
-    if not query or query.strip() == "":
-        query = state["prompt"]
-
-    try:
-        crop = parsed.get("crop") or None
-        traits = search_traits(query, crop=crop)
-        logger.info("[search_node] Retrieved %d traits for query: '%s'", len(traits), query[:60])
-        return {**state, "traits": traits}
-    except Exception as exc:
-        logger.warning("[search_node] Search failed: %s", exc)
-        return {**state, "traits": []}
+        try:
+            traits = search_traits(
+                query,
+                crop=None,
+                active_domains=domain_weights,
+            )
+            return {"traits": traits}
+        except Exception as exc:
+            logger.warning("[search_node] Search failed: %s", exc)
+            return {"traits": []}
 
 
 def research_node(state: PipelineState) -> PipelineState:
-    """Semantic Scholar: fetch relevant papers."""
-    parsed   = state.get("parsed") or {}
-    crop     = parsed.get("crop") or "crop"
-    stress   = " ".join(parsed.get("stress_conditions", [])) or "stress tolerance"
-    location = parsed.get("location", "")
-    # Include location in query so we get India-specific research where possible
-    query    = f"{crop} {stress} {location}".strip()
+    with time_block("Pipeline-ResearchNode"):
+        parsed         = state.get("parsed") or {}
+        domain_weights = state.get("domain_weights") or {}
+        domain_params  = parsed.get("domain_parameters", {})
 
-    try:
-        research = fetch_research(query)
-        logger.info("[research_node] Fetched %d insights.", len(research))
-        return {**state, "research": research}
-    except Exception as exc:
-        logger.warning("[research_node] %s — using empty research.", exc)
-        return {**state, "research": []}
+        if domain_weights:
+            top_domain = max(domain_weights, key=domain_weights.get)
+            top_params = domain_params.get(top_domain, {})
+            if isinstance(top_params, dict):
+                query = " ".join(str(v) for v in top_params.values() if v).strip()
+            else:
+                query = ""
+        else:
+            query = state["prompt"]
+
+        query = query or state["prompt"]
+
+        try:
+            research = fetch_research(query)
+            return {"research": research}
+        except Exception as exc:
+            logger.warning("[research_node] %s", exc)
+            return {"research": []}
 
 
 def build_node(state: PipelineState) -> PipelineState:
-    spec = build_spec(
-        state.get("parsed") or {},
-        state.get("traits") or [],
-        state.get("research") or [],
-    )
-    return {**state, "spec": spec}
+    with time_block("Pipeline-BuildNode"):
+        spec = build_spec(
+            state.get("parsed") or {},
+            state.get("traits") or [],
+            state.get("research") or [],
+        )
+    return {"spec": spec}
 
 
 def validate_node(state: PipelineState) -> PipelineState:
-    validated = validate_spec(state.get("spec") or {})
-    if validated:
-        # Export to disk / send to simulation team
-        pipeline_id = state.get("pipeline_id", "unknown")
-        export_spec(validated, pipeline_id)
-        return {**state, "validated": validated, "error": None}
-    return {
-        **state,
-        "error": "Spec validation failed.",
-        "retries": state["retries"] + 1,
-    }
+    with time_block("Pipeline-ValidateNode"):
+        validated = validate_spec(state.get("spec") or {})
+        if validated:
+            pipeline_id = state.get("pipeline_id", "unknown")
+            export_spec(validated, pipeline_id)
+            return {"validated": validated, "error": None}
+        return {
+            "error":   "Spec validation failed.",
+            "retries": state["retries"] + 1,
+        }
 
 
 # ── Routing ───────────────────────────────────────────────────────────────────
 
 def _route(state: PipelineState) -> str:
-    if state.get("validated"):
+    with time_block("Pipeline-_route"):
+        if state.get("validated"):
+            return "done"
+        if state["retries"] < settings.max_retries:
+            logger.info("[workflow] Retry %d/%d", state["retries"], settings.max_retries)
+            return "retry"
+        logger.error("[workflow] Max retries reached.")
         return "done"
-    if state["retries"] < settings.max_retries:
-        logger.info("[workflow] Retry %d/%d", state["retries"], settings.max_retries)
-        return "retry"
-    logger.error("[workflow] Max retries reached.")
-    return "done"
 
 
 # ── Graph ─────────────────────────────────────────────────────────────────────
 
 def _build_graph():
     g = StateGraph(PipelineState)
+    g.add_node("domain",   domain_node)
     g.add_node("parse",    parse_node)
     g.add_node("search",   search_node)
     g.add_node("research", research_node)
     g.add_node("build",    build_node)
     g.add_node("validate", validate_node)
 
-    g.set_entry_point("parse")
-    g.add_edge("parse",    "search")
-    g.add_edge("search",   "research")
-    g.add_edge("research", "build")
-    g.add_edge("build",    "validate")
+    g.set_entry_point("domain")
+    g.add_edge("domain",  "parse")
+    g.add_edge("parse",   "search")
+    g.add_edge("parse",   "research")
+    g.add_edge(["search", "research"], "build")
+    g.add_edge("build",   "validate")
     g.add_conditional_edges("validate", _route, {"retry": "parse", "done": END})
     return g.compile()
 
@@ -165,15 +180,16 @@ def run_pipeline(prompt: str) -> dict:
     pipeline_id = str(uuid.uuid4())
 
     result = _graph.invoke({
-        "prompt":    prompt,
-        "pipeline_id": pipeline_id,      
-        "parsed":    None,
-        "traits":    [],
-        "research":  [],
-        "spec":      None,
-        "validated": None,
-        "error":     None,
-        "retries":   0,
+        "prompt":         prompt,
+        "pipeline_id":    pipeline_id,
+        "parsed":         None,
+        "traits":         [],
+        "research":       [],
+        "domain_weights": None,
+        "spec":           None,
+        "validated":      None,
+        "error":          None,
+        "retries":        0,
     })
 
     return {

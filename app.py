@@ -187,9 +187,9 @@ if submitted and prompt.strip():
 
     if spec:
         col1, col2, col3 = st.columns(3)
-        col1.metric("Crop",        spec.get("crop", "—").title())
-        col2.metric("Location",    spec.get("location", "—"))
-        col3.metric("Temperature", f"{spec.get('temperature', '—')} °C")
+        col1.metric("Crop",        (spec.get("crop") or "—").title())
+        col2.metric("Location",    (spec.get("location") or "—"))
+        col3.metric("Temperature", f"{spec.get('temperature') or '—'} °C")
 
         with st.expander("📋 Full spec.json", expanded=True):
             st.json(spec)

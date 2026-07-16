@@ -1,0 +1,69 @@
+[computer_science_ai]
+description = Computer Science, Artificial Intelligence, Machine Learning, Software
+keywords = algorithm, neural network, machine learning, AI, deep learning, model, training, inference, GPU, compute, dataset, classification, NLP, transformer, code, software, optimization, complexity
+parameters = algorithm, model_type, dataset, input_size, output_type, framework, accuracy_metric, training_epochs, hardware_requirement
+
+[mathematics]
+description = Pure and applied mathematics, proofs, equations
+keywords = theorem, proof, equation, calculus, algebra, topology, statistics, probability, matrix, differential, integral, function, polynomial
+parameters = equation, variables, domain, constraints, theorem_name, proof_method, numerical_method
+
+[physics]
+description = Classical, quantum, theoretical and experimental physics
+keywords = quantum, particle, wave, force, energy, field, relativity, thermodynamics, optics, photon, electron, nucleus, gravity, spacetime
+parameters = temperature, pressure, energy, force, wavelength, radiation, mass, velocity, quantum_state
+
+[engineering]
+description = Mechanical, electrical, civil, chemical engineering systems
+keywords = circuit, voltage, stress, strain, fluid, mechanical, structural, thermal, signal, control system, actuator, sensor, bridge, load
+parameters = load, stress, voltage, current, fluid_flow, temperature, material, safety_factor, efficiency
+
+[biology]
+description = Life sciences, genetics, ecology, microbiology, agriculture, crop science, plant biology
+keywords = gene, protein, organism, cell, DNA, RNA, microbe, bacteria, enzyme, CRISPR, ecosystem, evolution, metabolism, species, bio-inspired, biomimetic, marine, biodegradable, living material, biological, wheat, rice, maize, corn, sugarcane, cotton, bajra, millet, mustard, soybean, crop, agriculture, plant, seed, drought, heat tolerance, rainfall, soil, farm, variety, cultivar, yield, pest, irrigation, harvest, germination, fertilizer, pesticide, kharif, rabi, jodhpur, jamshedpur, rajasthan, punjab, india
+parameters = crop, location, temperature, humidity, rainfall, soil_type, stress_conditions, target_traits, growing_season, irrigation_requirement, pest_resistance, yield_target
+
+[medicine]
+description = Medical science, disease, treatment, pharmacology, clinical
+keywords = disease, drug, treatment, patient, clinical, diagnosis, therapy, cancer, virus, immune, antibody, symptom, surgery, dose
+parameters = disease, drug, dosage, patient_condition, treatment_duration, side_effects, clinical_stage
+
+[chemistry]
+description = Chemical reactions, compounds, synthesis, molecular science
+keywords = molecule, reaction, compound, synthesis, catalyst, bond, polymer, acid, base, solvent, concentration, oxidation, reduction
+parameters = compound, reaction_type, catalyst, concentration, pH, temperature, yield_percent, solvent
+
+[materials_science]
+description = Material properties, fabrication, nano and smart materials
+keywords = material, crystal, alloy, composite, ceramic, polymer, nanomaterial, graphene, semiconductor, conductivity, hardness, tensile, superconductor
+parameters = material, hardness, conductivity, tensile_strength, temperature_resistance, fabrication_method
+
+[earth_environment]
+description = Earth systems, climate, ecology, environmental science
+keywords = climate, CO2, atmosphere, ocean, ecosystem, carbon, temperature, biodiversity, geology, soil, water, pollution, renewable, sustainability, marine, ocean acidification, biodegradable
+parameters = location, climate_type, CO2_level, temperature, rainfall, biodiversity_index, pollution_level, ecosystem_type
+
+[quant_finance]
+description = Quantitative finance, trading, risk models, derivatives
+keywords = portfolio, option, derivative, risk, hedge, volatility, return, pricing, arbitrage, stochastic, Monte Carlo, Black-Scholes, asset, market
+parameters = asset, risk_level, return_target, volatility, time_horizon, portfolio_size, hedging_strategy
+
+[astronomy_space]
+description = Astronomy, astrophysics, space exploration, cosmology
+keywords = star, galaxy, planet, orbit, telescope, NASA, Mars, asteroid, black hole, cosmology, spacecraft, propulsion, exoplanet, radiation
+parameters = celestial_body, distance_ly, mass_solar, luminosity, orbital_period, mission_type, propulsion_type
+
+[scientific_programming]
+description = Numerical methods, scientific computing, simulation code
+keywords = simulation, numerical, Python, C++, MATLAB, GPU, parallel, finite element, CUDA, OpenMP, solver, mesh, Monte Carlo, code
+parameters = language, framework, grid_size, time_steps, solver_type, parallelism, hardware
+
+[human_social]
+description = Psychology, sociology, anthropology, cognitive science
+keywords = behavior, cognition, society, culture, psychology, social, human, emotion, language, learning, memory, perception, identity
+parameters = population, behavior_type, cognitive_factor, cultural_context, study_design, sample_size
+
+[economics]
+description = Macroeconomics, microeconomics, policy, econometrics
+keywords = GDP, inflation, market, supply, demand, policy, trade, fiscal, monetary, regression, elasticity, equilibrium, welfare
+parameters = GDP, inflation_rate, market_size, policy_type, trade_volume, elasticity, time_period

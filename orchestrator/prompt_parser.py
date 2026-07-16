@@ -1,285 +1,255 @@
 """
-Prompt Parser  (Harshit's LLM layer)
+Prompt Parser — Layer 1 (domain-aware)
 
-Converts a free-text user prompt into a structured ParsedPrompt dict.
+Takes: user prompt + active domain weights (from domain_router)
+Does:  ONE LLM call per active domain → extracts domain-specific parameters
+Returns: { "domain_weights": {...}, "domain_parameters": { domain: {params} } }
 
-Key fixes over v1:
-  • Strips DeepSeek-R1 <think>…</think> CoT blocks before JSON extraction
-  • Normalises field aliases ("stress" → "stress_conditions", etc.)
-  • Rule-based regex fallback with an Indian-places lookup
-  • LLM + regex results are merged field-by-field (best of both)
-
-Bug fixes applied (Jay's audit):
-  Fix 1 — _extract_json(): replaced greedy regex r"\{.*\}" with
-           brace-counting _find_json_object() so extra LLM text after
-           the JSON object does not corrupt json.loads().
-
-  Fix 2 — _regex_fallback(): replaced dead chained .replace() with
-           _STRESS_TO_TRAIT dict so "drought stress" → "drought resistance"
-           instead of always producing "tolerance".
+Changes over previous version:
+  • Added _regex_fallback() — when LLM fails OR returns empty dict,
+    extracts crop, location, temperature, rainfall directly from the prompt
+    using regex + keyword lists. No LLM needed.
+  • Added parameters to domain.txt hint for biology domain.
+  • parse_prompt() now always returns non-empty domain_parameters
+    even when OpenRouter is rate-limiting or down.
 """
 import json
 import re
 import logging
 import requests
-
+from pathlib import Path
+import configparser
 from shared.config import settings
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM_PROMPT = """You are PRANAG-AI's scientific prompt parser.
+DOMAIN_FILE = Path(__file__).parent.parent / "domain.txt"
 
-Your ONLY job: convert the user prompt into ONE JSON object.
-Output NOTHING except the JSON — no markdown fences, no explanation, no <think> tags.
+# ── Known crop names for regex fallback ──────────────────────────────────────
+_CROPS = [
+    "wheat", "rice", "maize", "corn", "sugarcane", "cotton", "bajra",
+    "pearl millet", "mustard", "soybean", "sorghum", "barley", "chickpea",
+    "lentil", "groundnut", "peanut", "tomato", "potato", "onion", "mango",
+    "banana", "tea", "coffee", "jute", "sunflower", "canola",
+]
 
-EXACT schema (use these exact key names):
-{
-  "crop":              string,
-  "location":          string,
-  "temperature":       number | null,
-  "humidity":          number | null,
-  "rainfall":          number | null,
-  "soil_type":         string | null,
-  "stress_conditions": [string],
-  "target_traits":     [string],
-  "constraints":       {}
-}
-
-EXAMPLE
-Input:  "wheat for Jodhpur at 48°C with low rainfall"
-Output:
-{
-  "crop": "wheat",
-  "location": "Jodhpur, Rajasthan",
-  "temperature": 48.0,
-  "humidity": null,
-  "rainfall": 300,
-  "soil_type": "sandy loam",
-  "stress_conditions": ["extreme heat stress", "low rainfall", "drought"],
-  "target_traits": ["heat tolerance", "drought resistance", "deep root system"],
-  "constraints": {}
-}
-"""
-
-_ALIASES: dict = {
-    "stress":          "stress_conditions",
-    "stresses":        "stress_conditions",
-    "stress_factors":  "stress_conditions",
-    "traits":          "target_traits",
-    "desired_traits":  "target_traits",
-    "target_trait":    "target_traits",
-    "temp":            "temperature",
-    "temperature_c":   "temperature",
-    "temp_celsius":    "temperature",
-    "rain":            "rainfall",
-    "rainfall_mm":     "rainfall",
-    "soil":            "soil_type",
-    "place":           "location",
-    "region":          "location",
-    "city":            "location",
-}
-
-_FALLBACK: dict = {
-    "crop": "unknown",
-    "location": "unknown",
-    "temperature": None,
-    "humidity": None,
-    "rainfall": None,
-    "soil_type": None,
-    "stress_conditions": [],
-    "target_traits": [],
-    "constraints": {},
-}
-
-_INDIAN_PLACES: list[str] = [
-    "punjab", "haryana", "rajasthan", "gujarat", "maharashtra", "karnataka",
-    "tamil nadu", "andhra pradesh", "telangana", "madhya pradesh", "uttar pradesh",
-    "bihar", "jharkhand", "odisha", "west bengal", "assam", "kerala",
-    "himachal pradesh", "uttarakhand", "goa", "delhi", "mumbai", "chennai",
-    "kolkata", "bangalore", "bengaluru", "hyderabad", "jodhpur", "jaipur",
-    "lucknow", "kanpur", "nagpur", "surat", "ahmedabad", "amritsar", "ludhiana",
-    "chandigarh", "patna", "bhopal", "indore", "vadodara", "agra", "varanasi",
-    "meerut", "nashik", "coimbatore", "madurai", "vijayawada", "barmer",
-    "bikaner", "sikar", "kota", "ajmer", "udaipur", "dehradun", "shimla",
+# ── Indian cities + common location words ─────────────────────────────────────
+_LOCATIONS = [
+    "jamshedpur", "jodhpur", "delhi", "mumbai", "bangalore", "bengaluru",
+    "chennai", "kolkata", "hyderabad", "pune", "ahmedabad", "jaipur",
+    "lucknow", "kanpur", "nagpur", "patna", "bhopal", "indore", "vadodara",
+    "rajasthan", "uttar pradesh", "punjab", "haryana", "bihar", "maharashtra",
+    "gujarat", "madhya pradesh", "andhra pradesh", "telangana", "karnataka",
+    "tamil nadu", "west bengal", "odisha", "assam", "kerala",
+    "north india", "south india", "east india", "west india",
+    "gangetic plains", "deccan plateau", "coastal", "arid", "semi-arid",
 ]
 
 
-def _strip_think_tags(text: str) -> str:
-    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-
-
-def _normalise_keys(raw: dict) -> dict:
-    return {_ALIASES.get(k.lower(), k.lower()): v for k, v in raw.items()}
-
-
-def _find_json_object(text: str) -> str | None:
-    """
-    FIX 1 — Brace-counting JSON extractor.
-
-    Replaces re.search(r"\{.*\}", text, re.DOTALL) which was greedy and
-    captured too much when the LLM added extra text after the JSON object.
-
-    Walks character by character, tracking open/close brace depth,
-    and returns exactly the first complete JSON object.
-    """
-    start = text.find("{")
-    if start == -1:
-        return None
-    depth = 0
-    for i, ch in enumerate(text[start:], start):
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start: i + 1]
+def _fallback_rainfall_value(prompt: str):
+    """Convert rainfall wording into a numeric estimate in mm."""
+    rain_mm = re.search(r"(\d+(?:\.\d+)?)\s*mm\s*(?:of\s+)?rain", prompt.lower())
+    if rain_mm:
+        return float(rain_mm.group(1))
+    if "low rainfall" in prompt.lower() or "less rainfall" in prompt.lower() or "drought" in prompt.lower():
+        return 300.0
+    if "high rainfall" in prompt.lower() or "heavy rain" in prompt.lower() or "flood" in prompt.lower():
+        return 1200.0
     return None
 
 
+def _regex_fallback(prompt: str) -> dict:
+    """
+    Extract key parameters from the prompt using regex + keyword lists.
+    Used when LLM fails (rate limit, timeout) or returns empty.
+
+    Returns a flat dict with whatever could be extracted.
+    """
+    p = prompt.lower()
+    result = {}
+
+    # Crop
+    for crop in _CROPS:
+        if crop in p:
+            result["crop"] = crop
+            break
+
+    # Location
+    for loc in _LOCATIONS:
+        if loc in p:
+            result["location"] = loc.title()
+            break
+
+    # Temperature — look for patterns like "45°C", "45 degrees", "45C"
+    temp_match = re.search(
+        r"(\d+(?:\.\d+)?)\s*(?:°|degrees?|deg)?\s*[cC](?:\b|elsius)", prompt
+    )
+    if not temp_match:
+        temp_match = re.search(r"(\d+(?:\.\d+)?)\s*°[cC]", prompt)
+    if temp_match:
+        result["temperature"] = float(temp_match.group(1))
+
+    # Rainfall — "low rainfall", "high rainfall", "500mm rainfall"
+    rainfall = _fallback_rainfall_value(prompt)
+    if rainfall is not None:
+        result["rainfall"] = rainfall
+
+    # Stress conditions
+    stresses = []
+    stress_map = {
+        "heat":      "heat stress",
+        "drought":   "drought stress",
+        "flood":     "flood tolerance",
+        "waterlog":  "waterlogging tolerance",
+        "salinity":  "salinity tolerance",
+        "frost":     "frost tolerance",
+        "cold":      "cold stress",
+        "pest":      "pest resistance",
+        "disease":   "disease resistance",
+    }
+    for kw, label in stress_map.items():
+        if kw in p:
+            stresses.append(label)
+    if stresses:
+        result["stress_conditions"] = stresses
+
+    if result:
+        logger.info("[prompt_parser] Regex fallback extracted: %s", result)
+    else:
+        logger.warning("[prompt_parser] Regex fallback found nothing for: '%s'", prompt[:60])
+
+    return result
+
+
+def _load_domain_parameters(domain_name: str) -> str:
+    """Read the parameters section for a domain from domain.txt."""
+    parser = configparser.ConfigParser()
+    parser.read(DOMAIN_FILE)
+    if parser.has_option(domain_name, "parameters"):
+        return parser.get(domain_name, "parameters")
+
+    # Built-in hints for domains not yet in domain.txt
+    _HINTS = {
+        "biology":           "crop, location, temperature, humidity, rainfall, soil_type, stress_conditions, target_traits",
+        "computer_science_ai": "crop, location, temperature, humidity, rainfall, soil_type, stress_conditions, target_traits, algorithm, model_type, dataset",
+        "physics":           "temperature, pressure, energy, force, wavelength, radiation",
+        "chemistry":         "compound, reaction, catalyst, concentration, pH, temperature",
+        "earth_environment": "location, climate, CO2, temperature, rainfall, soil_type, ecosystem",
+        "materials_science": "material, hardness, conductivity, tensile_strength, temperature",
+        "medicine":          "disease, drug, dosage, patient_condition, treatment",
+        "engineering":       "load, stress, voltage, current, fluid_flow, temperature",
+        "mathematics":       "equation, theorem, variables, domain, constraints",
+        "quant_finance":     "asset, risk, return, volatility, time_horizon",
+        "astronomy_space":   "celestial_body, distance, mass, luminosity, orbital_period",
+        "human_social":      "population, behavior, culture, language, cognitive_factors",
+        "economics":         "GDP, inflation, market, policy, trade_volume",
+    }
+    return _HINTS.get(domain_name, "Extract all relevant scientific parameters mentioned in the prompt.")
+
+
 def _extract_json(text: str) -> dict:
-    text = _strip_think_tags(text)
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     text = re.sub(r"```(?:json)?", "", text).strip().rstrip("`").strip()
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        pass
-    match = _find_json_object(text)
-    if not match:
-        raise ValueError(f"No JSON object in LLM output:\n{text[:400]}")
-    return json.loads(match)
+        start = text.find("{")
+        if start == -1:
+            return {}
+        depth = 0
+        for i, ch in enumerate(text[start:], start):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start:i + 1])
+                    except:
+                        return {}
+        return {}
 
 
-_STRESS_KEYWORDS: dict = {
-    "heat stress":     ["heat", "hot", "temperature", "degree", "celsius", "thermal"],
-    "drought stress":  ["drought", "dry", "low rainfall", "arid", "water stress"],
-    "salinity stress": ["saline", "salinity", "salt", "alkaline"],
-    "cold stress":     ["cold", "frost", "freeze", "winter"],
-    "flood stress":    ["flood", "waterlog", "submerge"],
-}
+def _extract_for_domain(prompt: str, domain_name: str, weight: float) -> dict:
+    """One LLM call: extract parameters for a single domain."""
+    parameters_hint = _load_domain_parameters(domain_name)
 
-_TRAIT_MAP: dict = {
-    "heat tolerance":     ["heat", "hot", "high temperature", "degree", "celsius"],
-    "drought resistance": ["drought", "dry", "low rainfall", "water"],
-    "salinity tolerance": ["saline", "salt", "alkaline"],
-    "high yield":         ["yield", "productive", "output"],
-    "disease resistance": ["disease", "fungal", "rust", "blight"],
-}
+    system = f"""You are PRANA-G AI's scientific parameter extractor.
 
-# FIX 2 — Stress-to-trait lookup dict.
-# Replaces the dead chained .replace() which always produced "tolerance"
-# and never "resistance" because the first replace consumed " stress".
-_STRESS_TO_TRAIT: dict = {
-    "heat stress":     "heat tolerance",
-    "drought stress":  "drought resistance",
-    "salinity stress": "salinity tolerance",
-    "cold stress":     "cold tolerance",
-    "flood stress":    "flood tolerance",
-}
+Domain: {domain_name} (relevance weight: {weight})
+Parameters to extract: {parameters_hint}
 
-_TEMP_RE = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*(?:degree[s]?\s*)?°?\s*[cC](?:elsius)?")
-_DEG_RE  = re.compile(r"(\d{2,3})\s*degree")
-_HUM_RE  = re.compile(r"(\d{1,3})\s*%\s*humidity")
-_RAIN_RE = re.compile(r"(\d{2,4})\s*mm")
-
-_CROPS: list[str] = [
-    "wheat", "rice", "maize", "corn", "barley", "sorghum", "millet",
-    "soybean", "cotton", "mustard", "chickpea", "lentil", "bajra",
-    "jowar", "groundnut", "sugarcane", "potato", "tomato", "oat",
-]
-
-
-def _extract_location(prompt: str) -> str:
-    p = prompt.lower()
-    matched = [place for place in _INDIAN_PLACES if place in p]
-    if matched:
-        return max(matched, key=len).title()
-    m = re.search(
-        r"(?:in|for|at|from|near)\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)", prompt
-    )
-    return m.group(1).strip() if m else "unknown"
-
-
-def _regex_fallback(prompt: str) -> dict:
-    p = prompt.lower()
-
-    temp_match  = _TEMP_RE.search(prompt) or _DEG_RE.search(p)
-    temperature = float(temp_match.group(1)) if temp_match else None
-
-    hum_match  = _HUM_RE.search(p)
-    rain_match = _RAIN_RE.search(p)
-    humidity   = float(hum_match.group(1))  if hum_match  else None
-    rainfall   = float(rain_match.group(1)) if rain_match else None
-
-    stresses = [s for s, kws in _STRESS_KEYWORDS.items() if any(kw in p for kw in kws)]
-    if not stresses and temperature and temperature >= 38:
-        stresses = ["heat stress"]
-
-    traits = [t for t, kws in _TRAIT_MAP.items() if any(kw in p for kw in kws)]
-    if not traits and stresses:
-        # FIX 2: use lookup dict instead of broken chained replace
-        traits = [
-            _STRESS_TO_TRAIT.get(s, s.replace(" stress", " tolerance"))
-            for s in stresses
-        ]
-
-    return {
-        "crop":              next((c for c in _CROPS if c in p), "unknown"),
-        "location":          _extract_location(prompt),
-        "temperature":       temperature,
-        "humidity":          humidity,
-        "rainfall":          rainfall,
-        "soil_type":         None,
-        "stress_conditions": stresses,
-        "target_traits":     traits,
-        "constraints":       {},
-        "_source":           "regex_fallback",
-    }
-
-
-def parse_prompt(user_prompt: str) -> dict:
-    """
-    Strategy:
-    1. Regex fallback runs immediately (fast, no network, always works).
-    2. LLM called via Ollama; on success its non-empty fields override regex.
-    3. Merged result: every field is the best available value.
-    """
-    regex_result = _regex_fallback(user_prompt)
-    base = {**_FALLBACK, **regex_result}
-
+Rules:
+- Extract ONLY values explicitly stated or clearly implied in the prompt.
+- Use null for anything not mentioned.
+- Output ONLY a flat JSON object with the extracted parameters.
+- No explanation, no markdown, just JSON.
+"""
     try:
+        headers = {
+            "Authorization": f"Bearer {settings.openrouter_api_key}",
+            "Content-Type":  "application/json",
+        }
         payload = {
-            "model":  settings.ollama_model,
-            "stream": False,
+            "model": settings.openrouter_model,
             "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user",   "content": f"Parse this prompt:\n\n{user_prompt}"},
+                {"role": "system", "content": system},
+                {"role": "user",   "content": f"Extract parameters from:\n\n{prompt}"},
             ],
+            "response_format": {"type": "json_object"},
+            "max_tokens": 500,
         }
         resp = requests.post(
-            f"{settings.ollama_base_url}/api/chat",
+            f"{settings.openrouter_base_url}/chat/completions",
+            headers=headers,
             json=payload,
-            timeout=settings.ollama_timeout,
+            timeout=settings.llm_timeout,
         )
         resp.raise_for_status()
-        raw_text = resp.json().get("message", {}).get("content", "")
+        raw    = resp.json()["choices"][0]["message"]["content"]
+        result = _extract_json(raw)
 
-        if raw_text:
-            llm_result = _normalise_keys(_extract_json(raw_text))
-            for key in _FALLBACK:
-                val = llm_result.get(key)
-                if val not in (None, "", "unknown", [], {}):
-                    base[key] = val
-            logger.info("[prompt_parser] LLM merge applied.")
-        else:
-            logger.warning("[prompt_parser] Empty LLM response — regex only.")
+        # If LLM returned empty, use regex fallback
+        if not result:
+            logger.warning(
+                "[prompt_parser] LLM returned empty for domain %s — using regex fallback.",
+                domain_name,
+            )
+            result = _regex_fallback(prompt)
 
-    except requests.exceptions.ConnectionError:
-        logger.warning("[prompt_parser] Ollama not reachable — regex fallback only.")
-    except requests.exceptions.Timeout:
-        logger.warning("[prompt_parser] Ollama timed out — regex fallback only.")
-    except (ValueError, json.JSONDecodeError, KeyError) as exc:
-        logger.warning("[prompt_parser] LLM output unparseable (%s) — regex used.", exc)
+        return result
 
-    base.pop("_source", None)
-    logger.info("[prompt_parser] Final: %s", base)
-    return base
+    except Exception as exc:
+        logger.warning(
+            "[prompt_parser] Domain %s LLM failed (%s) — using regex fallback.",
+            domain_name, exc,
+        )
+        return _regex_fallback(prompt)
+
+
+def parse_prompt(user_prompt: str, domain_weights: dict) -> dict:
+    """
+    For each active domain, extract its parameters.
+    Falls back to regex extraction if LLM fails or returns empty.
+    Always returns non-empty domain_parameters for agriculture prompts.
+    """
+    domain_parameters = {}
+
+    for domain, weight in domain_weights.items():
+        logger.info("[prompt_parser] Extracting for domain: %s (weight=%.2f)", domain, weight)
+        params = _extract_for_domain(user_prompt, domain, weight)
+        if params:
+            domain_parameters[domain] = params
+
+    # If everything failed (no domain weights or all LLM calls failed),
+    # run regex fallback and put results under "biology" as best guess
+    if not domain_parameters:
+        logger.warning("[prompt_parser] All extractions failed — running standalone regex fallback.")
+        fallback = _regex_fallback(user_prompt)
+        if fallback:
+            domain_parameters["biology"] = fallback
+
+    return {
+        "domain_weights":    domain_weights,
+        "domain_parameters": domain_parameters,
+    }
